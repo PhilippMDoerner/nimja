@@ -6,7 +6,8 @@ type Path = string
 type
   NwtNodeKind = enum
     NStr, NIf, NElif, NElse, NWhile, NFor,
-    NVariable, NEval, NImport, NBlock, NExtends, NProc
+    NVariable, NEval, NImport, NBlock,
+    NExtends, NProc, NNimBlock
   NwtNode = object
     case kind: NwtNodeKind
     of NStr:
@@ -39,6 +40,9 @@ type
     of NProc:
       procHeader: string
       procBody: seq[NwtNode]
+    of NNimBlock:
+      nimBlockHeader: string
+      nimBlockBody: seq[NwtNode]
     else: discard
 
 # First step nodes
@@ -46,7 +50,8 @@ type
   FsNodeKind = enum
     FsIf, FsStr, FsEval, FsElse, FsElif, FsEndif, FsFor,
     FsEndfor, FsVariable, FsWhile, FsEndWhile, FsImport,
-    FsBlock, FsEndBlock, FsExtends, FsProc, FsFunc, FsEnd
+    FsBlock, FsEndBlock, FsExtends, FsProc, FsFunc, FsEnd,
+    FsNimBlock
   FSNode = object
     kind: FsNodeKind
     value: string
@@ -102,6 +107,12 @@ proc parseFirstStep(tokens: seq[Token]): seq[FSNode] =
     case token.kind
     of NwtEval:
       let (pref, suf) = splitStmt(token.value)
+
+      # nim blocks are a special case, they end with a ":"
+      if suf.strip().endsWith(":"):
+        result.add FSNode(kind: FsNimBlock, value: token.value)
+        continue
+
       case pref
       of "if": result.add FSNode(kind: FsIf, value: suf)
       of "elif": result.add FSNode(kind: FsElif, value: suf)
@@ -190,6 +201,16 @@ proc parseSsProc(fsTokens: seq[FsNode], pos: var int): NwtNode =
   result.procBody = consumeBlock(fsTokens, pos, {FsEnd})
   pos.inc # skip FsEnd
 
+proc parseSsNimBlock(fsTokens: seq[FsNode], pos: var int): NwtNode =
+  var elem: FsNode = fsTokens[pos]
+  echo elem
+  result = NwtNode(kind: NwtNodeKind.NNimBlock)
+  result.nimBlockHeader = elem.value
+  pos.inc # skip FsNimBlock
+  result.nimBlockBody = consumeBlock(fsTokens, pos, {FsEnd})
+  pos.inc # skip FsEnd
+  echo result
+
 proc parseSsExtends(fsTokens: seq[FsNode], pos: var int): NwtNode =
   var elem: FsNode = fsTokens[pos]
   let extendsPath = elem.value.strip(true, true, {'"'})
@@ -220,7 +241,7 @@ proc parseSecondStepOne(fsTokens: seq[FSNode], pos: var int): seq[NwtNode] =
     of FsBlock: return parseSsBlock(fsTokens, pos)
 
     of FsProc: return parseSsProc(fsTokens, pos)
-
+    of FsNimBlock: return parseSsNimBlock(fsTokens, pos)
 
     # Simple Types
     of FsStr:
@@ -345,12 +366,24 @@ proc astIf(token: NwtNode): NimNode =
       )
 
 proc astProc(token: NwtNode): NimNode =
-  discard
   let easyProc = "proc " & token.procHeader & " discard"
   result = parseStmt(easyProc) # dummy to build valid procBody
   result[0].body = nnkStmtList.newTree(
     astAst(token.procBody) # fill the proc body with content
   )
+
+proc astNimBlock(token: NwtNode): NimNode =
+  let easyNimBlock = token.nimBlockHeader & " discard"
+  result = parseStmt(easyNimBlock) # dummy to build valid nimBlock
+  for idx, elem in result[0].pairs():
+    echo idx, " ", repr elem
+  echo "--"
+  for idx, elem in result[0][2].pairs():
+    echo idx, " ", repr elem
+  result[0][^1] = nnkStmtList.newTree(
+    astAst(token.nimBlockBody) # fill the block with content
+  )
+  echo repr result
 
 proc astAstOne(token: NwtNode): NimNode =
   case token.kind
@@ -367,6 +400,7 @@ proc astAstOne(token: NwtNode): NimNode =
   of NExtends: return parseStmt("discard")
   of NBlock: return parseStmt("discard")
   of NProc: return astProc(token)
+  of NNimBlock: return astNimBlock(token)
   else: raise newException(ValueError, "cannot convert to ast:" & $token.kind)
 
 proc astAst(tokens: seq[NwtNode]): seq[NimNode] =
